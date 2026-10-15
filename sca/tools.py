@@ -94,8 +94,18 @@ class ToolRuntime:
             ToolDefinition("list_files", "List safe project files recursively.", optional_argument_types={"path": str, "max_results": int}),
             ToolDefinition("read_file", "Read bounded UTF-8 text and its SHA-256.", {"path": str}, {"start_line": int, "end_line": int}),
             ToolDefinition("search_text", "Find literal, case-sensitive text in safe UTF-8 files.", {"text": str}, {"path": str, "max_results": int}),
-            ToolDefinition("apply_patch", "Apply unique old/new text edits to one existing file at an expected SHA-256.", {"path": str, "expected_sha256": str, "edits": list}),
-            ToolDefinition("run_command", "Run an explicitly authorized allowlisted argv in a trusted project.", {"argv": list}),
+            ToolDefinition(
+                "apply_patch", "Edit one existing UTF-8 file using its current raw-byte SHA-256 from read_file. Each old span must match exactly once; edits cannot overlap. Requires user approval.",
+                {"path": str, "expected_sha256": str, "edits": list},
+                array_item_schemas={"edits": {
+                    "type": "object", "properties": {"old": {"type": "string"}, "new": {"type": "string"}},
+                    "required": ["old", "new"], "additionalProperties": False,
+                }},
+            ),
+            ToolDefinition(
+                "run_command", "Requires user approval and a trusted project. Allowed argv: ['python', '--version']; ['python', '-m', 'pytest', ...] with workspace targets and only -q, -v, -s, --disable-warnings, --maxfail=1; ['git', 'status', '--short']. No shell or other commands.",
+                {"argv": list}, array_item_schemas={"argv": {"type": "string"}},
+            ),
         )
 
     @property

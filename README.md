@@ -1,14 +1,15 @@
 # Fennec X Code
 
 I1 provides a deterministic Agent Core. I2 adds Workspace & Context and five
-restricted local tools through the same executor boundary. The approved
+restricted local tools. I3 adds a user-configured compatible model adapter and
+CLI through those same boundaries. The approved
 `SCA-V0-Core-Architecture-v0.1.md` and `SCA-V0-Codex-I1-Task.md` remain unchanged.
 
 Requires Python >=3.12. Runtime code uses only the standard library. The test
 extra requires pytest 8 or 9; command test execution also requires an installed
 pytest outside the target workspace. No dependencies are installed by the tools.
 
-Run the complete I1 and I2 suite from this directory:
+Run the complete I1, I2 and I3 suite from this directory:
 
 ```powershell
 python -m pytest -q -p no:cacheprovider
@@ -22,7 +23,13 @@ link tests use junctions if creating a symbolic link requires extra privileges.
 
 - `sca/contracts.py`: the six required dataclasses, messages, and tool schemas.
 - `sca/model.py`: unchanged `ModelGateway.generate(request) -> ModelResponse`
-  and scripted FakeModel. No live provider or network integration.
+  and scripted FakeModel.
+- `sca/provider.py`: `CompatibleModel(config, transport=None)` implements that
+  protocol with non-streaming Chat Completions requests. Transport is injectable;
+  tests mock responses and prohibit real provider HTTP connections.
+- `sca/cli.py`: minimal composition root, console activity and one-operation
+  authorization prompts. `python -m sca` runs it without package installation;
+  the packaged entry point is `fennec-x-code`.
 - `sca/workspace.py`: `Workspace(root, max_file_bytes=1048576)`, safe
   `resolve`, `read_text`, `list_files`, and `start_session(task)`. Text snapshots
   retain raw-byte SHA-256, content, identity and mode. SessionContext holds the
@@ -43,6 +50,69 @@ uses workspace and command helpers, and those helpers never invoke the model.
 types. Unknown arguments are rejected. `ToolResult` adds optional tuple fields
 `changed_files` and `tests_run`; Core aggregates this executor evidence rather
 than parsing claims in model text. Existing constructors keep their defaults.
+I3 adds optional `ToolDefinition.array_item_schemas` metadata for provider array
+items, so patch edit objects and argv strings have meaningful JSON schemas.
+It leaves existing argument validation and execution signatures intact.
+
+## User-selected model configuration
+
+No model, provider or API endpoint is selected by default. Missing configuration
+prints a clear message and stops before any request. Fennec does not create
+accounts/keys, install providers, download models, start servers or provision
+hosted services. No live-model test was run during I3 implementation.
+
+Supply these settings yourself, using CLI flags or environment variables:
+
+| Setting | CLI | Environment | Default |
+| --- | --- | --- | --- |
+| Model | `--model` | `FENNEC_MODEL` | Required, none selected |
+| API base URL | `--api-base-url` | `FENNEC_API_BASE_URL` | Required, none selected |
+| Authentication | `--auth none` or `--auth bearer` | `FENNEC_AUTH` | `none` |
+| Credential variable name | `--api-key-env NAME` | Reads the selected variable only | `FENNEC_API_KEY`, only sent with bearer auth |
+
+The URL is an API base, including any required prefix such as `/v1`; the adapter
+appends `/chat/completions`. CLI settings override their corresponding environment
+settings. Credentials come from the selected environment variable, never an API
+key command-line argument or an automatically read configuration/environment file.
+Unrelated provider environment variables are not discovered. Local compatible
+endpoints can use `--auth none` without any credential. Bearer auth requires HTTPS
+or a loopback HTTP endpoint. URL userinfo, queries and fragments are rejected.
+
+Once you have deliberately selected/configured your provider, invoke a task with
+`python -m sca --workspace PATH --task "Your instruction"`, adding model, URL and
+auth flags if you did not configure them in the environment. `--help` lists all
+options. The CLI shows the selected endpoint/model, tool calls, correlated
+results, final status, observed changed files, tests and errors. The selected
+credential is redacted from console output, and terminal control characters in
+model/tool text are escaped. Raw HTTP bodies/transport exceptions are never logged.
+
+Safe reads require no prompt. Every write and command shows its concrete
+arguments and requires a separate `y`/`yes`; all other replies or EOF deny it.
+There is no approve-all flag. Git preflight commands require their own approval.
+Commands also require `--trusted-project`; that flag does not approve commands
+automatically. Use disposable trusted projects for smoke tests.
+
+`--max-model-rounds` defaults to 25, `--model-timeout` to 30 seconds per socket
+operation, and `--command-timeout` to 10 seconds. Exit statuses are 0 for a
+completed loop, 1 for failure, 2 for configuration/access errors, 3 for the model
+round limit, and 130 for interruption. Earlier changes are retained on failure.
+
+The adapter sends JSON function schemas, serializes assistant calls followed by
+their `tool_call_id` results, and normalizes final answers/tool calls/errors.
+Malformed JSON, duplicate keys/IDs, non-finite numbers, refused/incomplete turns
+and malformed calls fail explicitly before tool execution. A tool-turn preface
+is not treated as a final answer. HTTP errors, timeouts and failed connections
+are sanitized and never retried; redirects are not followed. TLS verification is
+enabled, ambient proxy configuration is not used, and response capture is bounded
+to 1 MiB (request bodies to 2 MiB). Streaming, Responses API, tool-free models,
+non-bearer authentication and provider-specific features are outside this adapter.
+
+The wire format follows the official
+[OpenAI Chat Completions reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
+and [function-calling guide](https://developers.openai.com/api/docs/guides/function-calling).
+Compatibility must still be verified with your chosen provider. The optional
+[manual smoke procedure](docs/I3-LIVE-SMOKE.md) is deferred until you select and
+configure a provider and explicitly approve live requests.
 
 ## Tool inputs and results
 
@@ -143,7 +213,8 @@ children. Optimistic patch rechecks detect ordinary concurrent edits but do not
 provide an OS-wide compare-and-swap guarantee against malicious race attacks.
 Command side effects other than direct patch operations are not inventoried in
 `changed_files`. Sessions are in memory; cancellation and a whole-task wall-clock
-deadline remain deferred. No I3, I4, live LLM, CLI, subagents, Skills, planners,
-plugins, advanced memory or multi-agent features are implemented.
+deadline remain deferred. The I3 adapter is ready to connect, but live-model
+behavior is unverified until a provider is selected. No I4, subagents, Skills,
+planners, plugins, advanced memory or multi-agent features are implemented.
 
-**Stop after I2. I3 requires explicit authorization.**
+**Stop after I3. I4 requires explicit authorization.**

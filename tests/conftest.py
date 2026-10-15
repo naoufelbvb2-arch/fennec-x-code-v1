@@ -1,6 +1,8 @@
 """I2 fixtures isolate real operations in pytest temporary projects."""
 
 import itertools
+import http.client
+import json
 import os
 from pathlib import Path
 
@@ -9,6 +11,52 @@ import pytest
 from sca.contracts import ToolCall
 from sca.tools import ToolRuntime
 from sca.workspace import Workspace
+
+
+@pytest.fixture(autouse=True)
+def no_live_provider_connections(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Automated tests must not contact an LLM endpoint")
+
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", forbidden)
+    monkeypatch.setattr(http.client.HTTPSConnection, "connect", forbidden)
+
+
+@pytest.fixture
+def provider_response():
+    def response(content="Done.", *, calls=None, finish=None):
+        message = {"role": "assistant", "content": content}
+        if calls is not None:
+            message["tool_calls"] = [
+                {"id": call_id, "type": "function", "function": {
+                    "name": name, "arguments": json.dumps(arguments),
+                }} for call_id, name, arguments in calls
+            ]
+        return {"choices": [{"message": message, "finish_reason": finish or ("tool_calls" if calls else "stop")}]}
+
+    return response
+
+
+@pytest.fixture
+def mock_provider():
+    from sca.provider import HttpResponse
+
+    class ScriptedTransport:
+        def __init__(self, responses):
+            self.responses = iter(responses)
+            self.calls = []
+
+        def post(self, url, headers, body, *, timeout, max_bytes):
+            self.calls.append({"url": url, "headers": dict(headers), "payload": json.loads(body),
+                               "timeout": timeout, "max_bytes": max_bytes})
+            item = next(self.responses)
+            if isinstance(item, Exception):
+                raise item
+            if isinstance(item, HttpResponse):
+                return item
+            return HttpResponse(200, json.dumps(item).encode("utf-8"))
+
+    return ScriptedTransport
 
 
 @pytest.fixture

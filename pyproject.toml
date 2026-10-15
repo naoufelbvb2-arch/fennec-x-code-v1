@@ -9,6 +9,9 @@ description = "Fennec X Code: restricted local single-agent foundation"
 requires-python = ">=3.12"
 dependencies = []
 
+[project.scripts]
+fennec-x-code = "sca.cli:main"
+
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]
 

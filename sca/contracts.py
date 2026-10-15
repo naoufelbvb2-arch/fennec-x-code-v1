@@ -51,6 +51,7 @@ class ToolDefinition:
     description: str = ""
     argument_types: dict[str, type] = field(default_factory=dict)
     optional_argument_types: dict[str, type] = field(default_factory=dict)
+    array_item_schemas: dict[str, dict[str, object]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         require_text(self.name, "tool name")
@@ -62,6 +63,11 @@ class ToolDefinition:
             require_text(name, "argument name")
             if not isinstance(expected_type, type):
                 raise ValueError("argument_types values must be Python types")
+        if not isinstance(self.array_item_schemas, dict):
+            raise ValueError("array_item_schemas must be a dictionary")
+        for name, schema in self.array_item_schemas.items():
+            if (self.argument_types | self.optional_argument_types).get(name) is not list or not isinstance(schema, dict):
+                raise ValueError("array item schemas must describe declared list arguments")
 
     def validate_arguments(self, arguments: dict[str, object]) -> None:
         if not isinstance(arguments, dict):
