@@ -83,6 +83,17 @@ Unrelated provider environment variables are not discovered. Local compatible
 endpoints can use `--auth none` without any credential. Bearer auth requires HTTPS
 or a loopback HTTP endpoint. URL userinfo, queries and fragments are rejected.
 
+For an endpoint supporting the `thinking` extension, explicitly select
+`--disable-thinking` to send `{"thinking":{"type":"disabled"}}` at the top
+level of every request. Programmatic callers use
+`ModelConfig(..., disable_thinking=True)`. The default omits the field, including
+for DeepSeek URLs; no provider/model is detected or selected automatically.
+There is no thinking-enabled option: this adapter does not preserve
+`reasoning_content` across tool turns. See the
+[DeepSeek compatibility precheck](docs/DEEPSEEK-COMPATIBILITY-PRECHECK.md) for
+documented requirements and verification limitations. No live test is authorized
+by selecting this option.
+
 Once you have deliberately selected/configured your provider, invoke a task with
 `python -m sca --workspace PATH --task "Your instruction"`, adding model, URL and
 auth flags if you did not configure them in the environment. `--help` lists all

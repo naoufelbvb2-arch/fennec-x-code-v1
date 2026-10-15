@@ -32,6 +32,7 @@ class ModelConfig:
     api_key: str | None = field(default=None, repr=False)
     timeout_seconds: float = 30
     max_response_bytes: int = 1024 * 1024
+    disable_thinking: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str) or not self.model.strip() or any(ord(c) < 32 for c in self.model):
@@ -58,6 +59,8 @@ class ModelConfig:
             raise ConfigurationError("Model timeout must be finite, positive and at most 600 seconds.")
         if type(self.max_response_bytes) is not int or not 128 <= self.max_response_bytes <= 4 * 1024 * 1024:
             raise ConfigurationError("Response limit must be between 128 and 4194304 bytes.")
+        if type(self.disable_thinking) is not bool:
+            raise ConfigurationError("disable_thinking must be an explicit boolean.")
 
     @property
     def endpoint(self) -> str:
@@ -69,6 +72,7 @@ class ModelConfig:
         cls, *, model: str | None = None, api_base_url: str | None = None,
         auth: str | None = None, api_key_env: str = "FENNEC_API_KEY",
         environ: Mapping[str, str], timeout_seconds: float = 30,
+        disable_thinking: bool = False,
     ) -> "ModelConfig":
         selected_model = model if model is not None else environ.get("FENNEC_MODEL")
         selected_url = api_base_url if api_base_url is not None else environ.get("FENNEC_API_BASE_URL")
@@ -84,7 +88,7 @@ class ModelConfig:
             key = environ.get(api_key_env)
             if not key:
                 raise ConfigurationError("Bearer authentication is selected, but its API-key environment variable is empty.")
-        return cls(selected_model, selected_url, key, timeout_seconds)
+        return cls(selected_model, selected_url, key, timeout_seconds, disable_thinking=disable_thinking)
 
 
 @dataclass(frozen=True)
@@ -296,7 +300,10 @@ class CompatibleModel:
         if self._budget is not None:
             self._budget.check()
         try:
-            body = json.dumps(build_payload(request, self.config.model), ensure_ascii=True, allow_nan=False).encode("utf-8")
+            payload = build_payload(request, self.config.model)
+            if self.config.disable_thinking:
+                payload["thinking"] = {"type": "disabled"}
+            body = json.dumps(payload, ensure_ascii=True, allow_nan=False).encode("utf-8")
             if len(body) > 2 * 1024 * 1024:
                 return ModelResponse(error="Model request exceeds the 2 MiB limit.")
         except (ValueError, TypeError, RecursionError):

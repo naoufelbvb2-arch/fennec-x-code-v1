@@ -100,6 +100,7 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", help="Model name (or FENNEC_MODEL); no default model")
     parser.add_argument("--api-base-url", help="Compatible API base URL (or FENNEC_API_BASE_URL); no default endpoint")
     parser.add_argument("--auth", help="none or bearer (or FENNEC_AUTH); default: none")
+    parser.add_argument("--disable-thinking", action="store_true", help="Explicitly send thinking.type=disabled; use only with compatible endpoints")
     parser.add_argument("--api-key-env", default="FENNEC_API_KEY", help="Environment variable containing a bearer token; used only with bearer auth")
     parser.add_argument("--trusted-project", action="store_true", help="Explicitly trust project code for command execution; every command still requires approval")
     parser.add_argument("--max-model-rounds", type=int, default=25)
@@ -129,6 +130,7 @@ def main(
         config = ModelConfig.from_environment(
             model=args.model, api_base_url=args.api_base_url, auth=args.auth,
             api_key_env=args.api_key_env, environ=environment, timeout_seconds=args.model_timeout,
+            disable_thinking=args.disable_thinking,
         )
         if not args.workspace or not args.task or not args.task.strip():
             raise ConfigurationError("Specify --workspace and a non-empty --task. No request sent.")
