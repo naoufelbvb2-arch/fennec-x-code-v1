@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 
+from sca.limits import TaskBudget
 from sca.workspace import Workspace, WorkspaceError, _is_link
 
 
@@ -28,7 +29,7 @@ class CommandOutcome:
 
 
 class CommandRunner:
-    def __init__(self, workspace: Workspace, *, timeout_seconds: float = 10, max_output_bytes: int = 16384) -> None:
+    def __init__(self, workspace: Workspace, *, timeout_seconds: float = 10, max_output_bytes: int = 16384, budget: TaskBudget | None = None) -> None:
         if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or not 0 < timeout_seconds <= 600:
             raise ValueError("timeout_seconds must be positive and at most 600")
         if type(max_output_bytes) is not int or not 128 <= max_output_bytes <= 1024 * 1024:
@@ -36,6 +37,7 @@ class CommandRunner:
         self.workspace = workspace
         self.timeout_seconds = timeout_seconds
         self.max_output_bytes = max_output_bytes
+        self._budget = budget
         self._python = str(Path(sys.executable).resolve(strict=True))
         pytest_spec = importlib.util.find_spec("pytest")
         self._pytest_site = (
@@ -142,6 +144,8 @@ class CommandRunner:
         capture_errors: list[str] = []
         overflow = threading.Event()
         finished = threading.Event()
+        timeout = self.timeout_seconds if self._budget is None else self._budget.timeout(self.timeout_seconds)
+        deadline = time.monotonic() + timeout
         process = subprocess.Popen(
             prepared, cwd=self.workspace.root, env=self.environment(), shell=False,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -163,10 +167,9 @@ class CommandRunner:
                 finished.set()
 
         reader = threading.Thread(target=drain, daemon=True)
-        reader.start()
-        deadline = time.monotonic() + self.timeout_seconds
         timed_out = False
         try:
+            reader.start()
             while not (process.poll() is not None and finished.is_set()):
                 if overflow.is_set() or capture_errors:
                     self._kill_tree(process)
@@ -184,7 +187,8 @@ class CommandRunner:
             if process.poll() is None:
                 self._kill_tree(process)
                 process.wait(timeout=5)
-            reader.join(timeout=1)
+            if reader.ident is not None:
+                reader.join(timeout=1)
             if not reader.is_alive():
                 process.stdout.close()
         return CommandOutcome(

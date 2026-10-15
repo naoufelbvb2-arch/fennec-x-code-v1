@@ -1,6 +1,6 @@
 """Provider-independent contracts and explicit boundary validation.
 
-Task statuses: COMPLETED (loop finished), ERROR, LIMIT_REACHED.
+Task statuses: COMPLETED (loop finished), ERROR, LIMIT_REACHED, CANCELLED.
 Tool statuses: SUCCESS, ERROR. Completion alone verifies no project changes.
 Mutable payloads are copied at gateway/executor boundaries by AgentCore.
 """
@@ -156,7 +156,7 @@ class ModelResponse:
 
 @dataclass(frozen=True)
 class TaskResult:
-    status: Literal["COMPLETED", "ERROR", "LIMIT_REACHED"]
+    status: Literal["COMPLETED", "ERROR", "LIMIT_REACHED", "CANCELLED"]
     summary: str
     changed_files: tuple[str, ...] = ()
     tests_run: tuple[str, ...] = ()

@@ -17,6 +17,7 @@ import uuid
 
 from sca.agent import AgentCore
 from sca.contracts import AgentTask, ToolCall, ToolDefinition, ToolResult
+from sca.limits import TaskBudget
 from sca.provider import CompatibleModel, ConfigurationError, JsonTransport, ModelConfig
 from sca.tools import ToolExecutor, ToolRuntime
 from sca.workspace import Workspace
@@ -102,7 +103,8 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key-env", default="FENNEC_API_KEY", help="Environment variable containing a bearer token; used only with bearer auth")
     parser.add_argument("--trusted-project", action="store_true", help="Explicitly trust project code for command execution; every command still requires approval")
     parser.add_argument("--max-model-rounds", type=int, default=25)
-    parser.add_argument("--model-timeout", type=float, default=30, help="Model socket timeout in seconds (max 600)")
+    parser.add_argument("--model-timeout", type=float, default=30, help="Model HTTP exchange timeout in seconds (max 600)")
+    parser.add_argument("--task-timeout", type=float, default=600, help="Whole-task deadline in seconds (finite and positive)")
     parser.add_argument("--command-timeout", type=float, default=10, help="Command timeout in seconds (max 600)")
     return parser
 
@@ -134,21 +136,25 @@ def main(
             raise ConfigurationError("--max-model-rounds must be positive.")
         if not math.isfinite(args.command_timeout) or not 0 < args.command_timeout <= 600:
             raise ConfigurationError("--command-timeout must be finite, positive and at most 600 seconds.")
-        workspace = Workspace(args.workspace)
+        budget = TaskBudget(args.task_timeout)
+        workspace = Workspace(args.workspace, budget=budget)
         task = AgentTask(args.task, str(workspace.root), uuid.uuid4().hex)
         authorize = ConsoleAuthorization(out, input if input_fn is None else input_fn)
         runtime = ToolRuntime(
             workspace, authorize=authorize, trusted_project=args.trusted_project,
             timeout_seconds=args.command_timeout,
+            budget=budget,
         )
-        gateway = CompatibleModel(config, transport=transport)
+        gateway = CompatibleModel(config, transport=transport, budget=budget)
         executor = ConsoleExecutor(runtime, out)
         out.write(f"Workspace: {workspace.root}\nModel: {config.model}\nEndpoint: {config.endpoint}")
-        result = AgentCore(gateway, executor, max_model_rounds=args.max_model_rounds).run(task)
+        result = AgentCore(gateway, executor, max_model_rounds=args.max_model_rounds, budget=budget).run(task)
         report = asdict(result)
         del report["tool_results"]  # Already displayed as activity; retain summary evidence.
         out.write("Task result:\n" + json.dumps(report, ensure_ascii=True, indent=2))
-        return {"COMPLETED": 0, "ERROR": 1, "LIMIT_REACHED": 3}[result.status]
+        if result.status == "CANCELLED":
+            err.write("Interrupted. Any earlier workspace changes are retained.")
+        return {"COMPLETED": 0, "ERROR": 1, "LIMIT_REACHED": 3, "CANCELLED": 130}[result.status]
     except SystemExit as exc:
         return int(exc.code)
     except (ConfigurationError, ValueError) as exc:

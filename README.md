@@ -2,14 +2,15 @@
 
 I1 provides a deterministic Agent Core. I2 adds Workspace & Context and five
 restricted local tools. I3 adds a user-configured compatible model adapter and
-CLI through those same boundaries. The approved
+CLI through those same boundaries. I4 verifies complete tasks and hardens task
+deadlines, interruption reporting, and timeout cleanup. The approved
 `SCA-V0-Core-Architecture-v0.1.md` and `SCA-V0-Codex-I1-Task.md` remain unchanged.
 
 Requires Python >=3.12. Runtime code uses only the standard library. The test
 extra requires pytest 8 or 9; command test execution also requires an installed
 pytest outside the target workspace. No dependencies are installed by the tools.
 
-Run the complete I1, I2 and I3 suite from this directory:
+Run the complete I1, I2, I3 and I4 suite from this directory:
 
 ```powershell
 python -m pytest -q -p no:cacheprovider
@@ -42,7 +43,11 @@ link tests use junctions if creating a symbolic link requires extra privileges.
 - `sca/commands.py`: fixed command allowlist and bounded process runner. It
   performs no task orchestration and exposes no plugin registration mechanism.
 - `sca/agent.py`: `AgentCore(gateway, executor, max_model_rounds=25,
-  continue_on_tool_error=False).run(task) -> TaskResult`.
+  continue_on_tool_error=False, max_task_seconds=600, budget=None).run(task)
+  -> TaskResult`.
+- `sca/limits.py`: `TaskBudget(seconds=600, clock=monotonic)` and
+  `TaskLimitExceeded`. A shared monotonic deadline primitive, without provider,
+  workspace or tool dependencies. It performs no orchestration.
 
 Dependencies flow from Agent Core to interfaces and contracts; the tool runtime
 uses workspace and command helpers, and those helpers never invoke the model.
@@ -92,10 +97,29 @@ There is no approve-all flag. Git preflight commands require their own approval.
 Commands also require `--trusted-project`; that flag does not approve commands
 automatically. Use disposable trusted projects for smoke tests.
 
-`--max-model-rounds` defaults to 25, `--model-timeout` to 30 seconds per socket
-operation, and `--command-timeout` to 10 seconds. Exit statuses are 0 for a
-completed loop, 1 for failure, 2 for configuration/access errors, 3 for the model
-round limit, and 130 for interruption. Earlier changes are retained on failure.
+`--max-model-rounds` defaults to 25, `--model-timeout` to 30 seconds per HTTP
+exchange, `--command-timeout` to 10 seconds, and `--task-timeout` to 600 seconds.
+Exit statuses are 0 for a completed loop, 1 for failure, 2 for configuration/access
+errors, 3 for a round/task limit, and 130 for interruption. Core returns a
+structured `CANCELLED` result retaining earlier tool/change/test evidence; an
+interrupted tool has a correlated error describing its uncertain outcome.
+Earlier changes are retained, and interrupted operations are never retried.
+
+The CLI shares one TaskBudget with Core, gateway, runtime, runner and workspace.
+Core starts it for each task before executor setup, checks it at model/tool
+boundaries, and refuses late final answers. Provider/command waits are capped by
+remaining time. HTTP capture has a watchdog that shuts down the active socket,
+including a response that trickles bytes. File scans have deadline checkpoints;
+patching checks again immediately before replacement and still cleans temporary
+files after expiry. A delayed permission answer cannot authorize work after the
+deadline. Programmatic composition should pass the same `budget=` instance to
+these components; Core alone cannot preempt an arbitrary custom implementation.
+
+Deadline enforcement is cooperative around synchronous local operations. A
+terminal prompt is interruptible with Ctrl+C, but expiry is checked when input
+returns; it does not forcibly dismiss a blocked prompt. DNS resolution, filesystem
+system calls and process-tree cleanup can outlast the nominal deadline. This is
+not a hard real-time execution guarantee.
 
 The adapter sends JSON function schemas, serializes assistant calls followed by
 their `tool_call_id` results, and normalizes final answers/tool calls/errors.
@@ -212,9 +236,11 @@ Process-tree termination is best effort, especially for detached/reparented
 children. Optimistic patch rechecks detect ordinary concurrent edits but do not
 provide an OS-wide compare-and-swap guarantee against malicious race attacks.
 Command side effects other than direct patch operations are not inventoried in
-`changed_files`. Sessions are in memory; cancellation and a whole-task wall-clock
-deadline remain deferred. The I3 adapter is ready to connect, but live-model
-behavior is unverified until a provider is selected. No I4, subagents, Skills,
-planners, plugins, advanced memory or multi-agent features are implemented.
+`changed_files`. Sessions remain in memory. Live-model behavior is unverified
+until a provider is selected and testing is explicitly authorized. Automated
+verification uses FakeModel and mocked responses only; full V0 acceptance is
+pending that live verification. No subagents, Skills, planners, plugins,
+advanced memory or multi-agent features are implemented.
 
-**Stop after I3. I4 requires explicit authorization.**
+See `I4-IMPLEMENTATION-REPORT.md` for the verification record and acceptance gates.
+**Stop after I4 verification. Further work requires explicit authorization.**

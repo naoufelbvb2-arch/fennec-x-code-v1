@@ -13,10 +13,12 @@ import json
 import math
 import re
 import socket
+import threading
 from typing import Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 from sca.contracts import ModelRequest, ModelResponse, ToolCall, ToolDefinition, require_text
+from sca.limits import TaskBudget, TaskLimitExceeded
 
 
 class ConfigurationError(ValueError):
@@ -98,7 +100,8 @@ class JsonTransport(Protocol):
 class HttpTransport:
     """One POST, verified TLS, no redirects, ambient proxies, or retries.
 
-    Timeout applies to socket operations; it is not a whole-task deadline.
+    A watchdog bounds the whole HTTP exchange, including a trickling response.
+    DNS resolution and OS resource cleanup are not forcibly preemptible.
     """
 
     def post(self, url: str, headers: Mapping[str, str], body: bytes, *, timeout: float, max_bytes: int) -> HttpResponse:
@@ -107,15 +110,40 @@ class HttpTransport:
         connection = connection_type(parsed.hostname, parsed.port, timeout=timeout)
         # Do not inherit process-wide HTTP debug logging: it prints raw headers.
         connection.debuglevel = 0
+        expired = threading.Event()
+        active_socket = None
+
+        def abort() -> None:
+            expired.set()
+            # shutdown interrupts a read even when getresponse() owns a file
+            # wrapper around the socket. Never print exception/header data.
+            sock = getattr(connection, "sock", None) or active_socket
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+        watchdog = threading.Timer(timeout, abort)
+        watchdog.daemon = True
         try:
+            watchdog.start()
             connection.request("POST", parsed.path or "/", body=body, headers=dict(headers))
+            active_socket = getattr(connection, "sock", None)
             response = connection.getresponse()
             # Error bodies may echo credentials. Do not read, decode or log them.
             data = response.read(max_bytes + 1) if 200 <= response.status < 300 else b""
+            if expired.is_set():
+                raise TimeoutError
             if len(data) > max_bytes:
                 raise ValueError("Response limit exceeded")
             return HttpResponse(response.status, data)
+        except Exception:
+            if expired.is_set():
+                raise TimeoutError from None
+            raise
         finally:
+            watchdog.cancel()
             connection.close()
 
 
@@ -259,11 +287,14 @@ def parse_response(body: bytes) -> ModelResponse:
 class CompatibleModel:
     """ModelGateway implementation for a user-selected compatible endpoint."""
 
-    def __init__(self, config: ModelConfig, transport: JsonTransport | None = None) -> None:
+    def __init__(self, config: ModelConfig, transport: JsonTransport | None = None, *, budget: TaskBudget | None = None) -> None:
         self.config = config
+        self._budget = budget
         self._transport = transport if transport is not None else HttpTransport()
 
     def generate(self, request: ModelRequest) -> ModelResponse:
+        if self._budget is not None:
+            self._budget.check()
         try:
             body = json.dumps(build_payload(request, self.config.model), ensure_ascii=True, allow_nan=False).encode("utf-8")
             if len(body) > 2 * 1024 * 1024:
@@ -274,10 +305,13 @@ class CompatibleModel:
         if self.config.api_key is not None:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
         try:
+            timeout = self.config.timeout_seconds if self._budget is None else self._budget.timeout(self.config.timeout_seconds)
             response = self._transport.post(
-                self.config.endpoint, headers, body, timeout=self.config.timeout_seconds,
+                self.config.endpoint, headers, body, timeout=timeout,
                 max_bytes=self.config.max_response_bytes,
             )
+            if self._budget is not None:
+                self._budget.check()
             if not isinstance(response, HttpResponse) or type(response.status) is not int or not isinstance(response.body, bytes):
                 return ModelResponse(error="Invalid provider transport response.")
             if not 200 <= response.status < 300:
@@ -291,8 +325,14 @@ class CompatibleModel:
             if len(response.body) > self.config.max_response_bytes:
                 return ModelResponse(error="Provider response exceeds the configured size limit.")
             return parse_response(response.body)
+        except TaskLimitExceeded:
+            raise
         except (TimeoutError, socket.timeout):
+            if self._budget is not None:
+                self._budget.check()
             return ModelResponse(error="Provider connection or read timed out; no retry attempted.")
         except Exception:
+            if self._budget is not None:
+                self._budget.check()
             # Exception text can contain headers, credentials or raw bodies.
             return ModelResponse(error="Provider connection, response capture or transport failed; no retry attempted.")

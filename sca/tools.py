@@ -12,6 +12,7 @@ from typing import Protocol
 
 from sca.commands import CommandRunner
 from sca.contracts import AgentTask, ToolCall, ToolDefinition, ToolResult
+from sca.limits import TaskBudget
 from sca.workspace import SessionContext, Workspace, WorkspaceError
 
 
@@ -80,6 +81,7 @@ class ToolRuntime:
         trusted_project: bool = False,
         timeout_seconds: float = 10,
         max_output_bytes: int = 16384,
+        budget: TaskBudget | None = None,
     ) -> None:
         if type(trusted_project) is not bool:
             raise ValueError("trusted_project must be a boolean")
@@ -87,7 +89,8 @@ class ToolRuntime:
         self.session = SessionContext(workspace_root=workspace.root)
         self._authorize = authorize
         self._trusted_project = trusted_project
-        self._runner = CommandRunner(workspace, timeout_seconds=timeout_seconds, max_output_bytes=max_output_bytes)
+        self._budget = budget
+        self._runner = CommandRunner(workspace, timeout_seconds=timeout_seconds, max_output_bytes=max_output_bytes, budget=budget)
         self._max_output_bytes = max_output_bytes
         self._seen_ids: set[str] = set()
         self._definitions = (
@@ -117,8 +120,16 @@ class ToolRuntime:
         self._seen_ids.clear()
 
     def _require_authorization(self, call: ToolCall) -> None:
+        self._check_budget()
         if self._authorize is None or self._authorize(deepcopy(call)) is not True:
             raise PermissionError(f"authorization denied for {call.tool_name}")
+        # Waiting for an answer counts toward the task deadline. An old grant
+        # must never start a write or command after the deadline.
+        self._check_budget()
+
+    def _check_budget(self) -> None:
+        if self._budget is not None:
+            self._budget.check()
 
     def execute(self, call: ToolCall) -> ToolResult:
         call = deepcopy(call)
@@ -127,6 +138,7 @@ class ToolRuntime:
             return ToolResult(call.call_id, "ERROR", error="duplicate call_id; execution was not repeated")
         self._seen_ids.add(call.call_id)
         try:
+            self._check_budget()
             definition = next((item for item in self._definitions if item.name == call.tool_name), None)
             if definition is None:
                 raise ValueError(f"unknown tool: {call.tool_name}")
@@ -189,6 +201,7 @@ class ToolRuntime:
         total_bytes = 0
         remaining_read_bytes = 8 * self.workspace.max_file_bytes
         for relative in files:
+            self._check_budget()
             size = self.workspace.resolve(relative).stat().st_size
             if size > self.workspace.max_file_bytes:
                 continue
@@ -263,6 +276,7 @@ class ToolRuntime:
         if b"\0" in raw or len(raw) > self.workspace.max_file_bytes:
             raise ValueError("patched content must be bounded UTF-8 text without NUL bytes")
         self._ensure_initial_git_status(call)
+        self._check_budget()
         destination = self.workspace.resolve(path)
         descriptor, temporary_name = tempfile.mkstemp(prefix=".fennec-", suffix=".tmp", dir=destination.parent)
         temporary_relative = os.path.relpath(temporary_name, self.workspace.root).replace(os.sep, "/")
@@ -277,6 +291,7 @@ class ToolRuntime:
             if current.sha256 != snapshot.sha256 or current.identity != snapshot.identity:
                 raise WorkspaceError("file changed during patch preparation; user changes preserved")
             self.workspace.resolve(path)
+            self._check_budget()
             os.replace(temporary_name, destination)
         finally:
             if os.path.lexists(temporary_name):

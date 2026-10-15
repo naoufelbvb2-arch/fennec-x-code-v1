@@ -11,6 +11,7 @@ from pathlib import Path, PureWindowsPath
 import stat
 
 from sca.contracts import AgentTask, ToolResult
+from sca.limits import TaskBudget
 
 
 class WorkspaceError(ValueError):
@@ -72,7 +73,7 @@ class SessionContext:
 
 
 class Workspace:
-    def __init__(self, root: str | Path, *, max_file_bytes: int = 1024 * 1024) -> None:
+    def __init__(self, root: str | Path, *, max_file_bytes: int = 1024 * 1024, budget: TaskBudget | None = None) -> None:
         if not isinstance(root, (str, Path)) or not str(root).strip():
             raise WorkspaceError("workspace root must be a non-empty path")
         if type(max_file_bytes) is not int or max_file_bytes < 1:
@@ -93,6 +94,7 @@ class Workspace:
         if any(prohibited_name(part) for part in self.root.parts):
             raise WorkspaceError("workspace root resolves inside a protected path")
         self.max_file_bytes = max_file_bytes
+        self._budget = budget
         self._root_identity = self.root.stat().st_dev, self.root.stat().st_ino
 
     def _validate_root(self) -> None:
@@ -147,6 +149,8 @@ class Workspace:
         return SessionContext(workspace_root=self.root, task=task)
 
     def read_text(self, relative: str) -> TextSnapshot:
+        if self._budget is not None:
+            self._budget.check()
         path = self.resolve(relative)
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path, flags)
@@ -170,6 +174,8 @@ class Workspace:
         return TextSnapshot(relative, content, hashlib.sha256(raw).hexdigest(), _identity(current), current.st_mode)
 
     def list_files(self, relative: str = ".", *, max_results: int = 200, max_entries: int = 10000) -> tuple[tuple[str, ...], bool]:
+        if self._budget is not None:
+            self._budget.check()
         if type(max_results) is not int or not 1 <= max_results <= 10000:
             raise WorkspaceError("max_results must be between 1 and 10000")
         if type(max_entries) is not int or not 1 <= max_entries <= 1000000:
@@ -186,6 +192,8 @@ class Workspace:
             entries = []
             with os.scandir(directory) as iterator:
                 for entry in iterator:
+                    if self._budget is not None:
+                        self._budget.check()
                     visited += 1
                     if visited > max_entries:
                         return tuple(sorted(files)), True
