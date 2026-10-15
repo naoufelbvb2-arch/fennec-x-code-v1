@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fennec-x-code"
 version = "0.1.0"
-description = "Fennec X Code I1: deterministic, in-memory Agent Core"
+description = "Fennec X Code: restricted local single-agent foundation"
 requires-python = ">=3.12"
 dependencies = []
 

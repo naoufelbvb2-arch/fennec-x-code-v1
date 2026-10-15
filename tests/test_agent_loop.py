@@ -224,8 +224,9 @@ def test_maximum_model_rounds_stops_loop() -> None:
 
     assert result.status == "LIMIT_REACHED"
     assert result.model_rounds == len(model.requests) == 2
-    assert executor.calls == [call("c1"), call("c2")]
-    assert result.tool_results == tuple(outcomes)
+    # I2 safety change: the final round cannot execute an unreviewable batch.
+    assert executor.calls == [call("c1")]
+    assert result.tool_results == tuple(outcomes[:1])
     assert result.errors
     assert model.requests[1].limits == {"max_model_rounds": 2}
 

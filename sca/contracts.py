@@ -1,4 +1,4 @@
-"""Provider-independent I1 contracts and explicit boundary validation.
+"""Provider-independent contracts and explicit boundary validation.
 
 Task statuses: COMPLETED (loop finished), ERROR, LIMIT_REACHED.
 Tool statuses: SUCCESS, ERROR. Completion alone verifies no project changes.
@@ -23,7 +23,7 @@ class AgentTask:
     def __post_init__(self) -> None:
         for label in ("instruction", "workspace_root", "session_id"):
             require_text(getattr(self, label), label)
-        # workspace_root is metadata only: I1 never resolves or reads it.
+        # The real executor validates this root when a task starts.
 
 
 @dataclass(frozen=True)
@@ -41,29 +41,36 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class ToolDefinition:
-    """Minimal fake-tool schema: all named arguments are required, no extras.
+    """Small exact-type schema with required and optional named arguments.
 
-    Types are exact Python types (so bool does not satisfy int). This is an
-    I1 test contract, not a general schema engine or real tool registry.
+    Types are exact Python types (so bool does not satisfy int). This is a
+    tool contract, not a general schema engine or plugin registry.
     """
 
     name: str
     description: str = ""
     argument_types: dict[str, type] = field(default_factory=dict)
+    optional_argument_types: dict[str, type] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         require_text(self.name, "tool name")
-        if not isinstance(self.argument_types, dict):
-            raise ValueError("argument_types must be a dictionary")
-        for name, expected_type in self.argument_types.items():
+        if not isinstance(self.argument_types, dict) or not isinstance(self.optional_argument_types, dict):
+            raise ValueError("argument_types must be dictionaries")
+        if self.argument_types.keys() & self.optional_argument_types.keys():
+            raise ValueError("required and optional argument names must be distinct")
+        for name, expected_type in (self.argument_types | self.optional_argument_types).items():
             require_text(name, "argument name")
             if not isinstance(expected_type, type):
                 raise ValueError("argument_types values must be Python types")
 
     def validate_arguments(self, arguments: dict[str, object]) -> None:
-        if arguments.keys() != self.argument_types.keys():
+        if not isinstance(arguments, dict):
+            raise ValueError("arguments must be a dictionary")
+        schema = self.argument_types | self.optional_argument_types
+        if not self.argument_types.keys() <= arguments.keys() or not arguments.keys() <= schema.keys():
             raise ValueError(f"invalid arguments for {self.name}: expected {tuple(self.argument_types)}")
-        for name, expected_type in self.argument_types.items():
+        for name in arguments:
+            expected_type = schema[name]
             if type(arguments[name]) is not expected_type:
                 raise ValueError(f"invalid argument {name!r}: expected {expected_type.__name__}")
 
@@ -75,6 +82,8 @@ class ToolResult:
     output: str = ""
     error: str | None = None
     truncated: bool = False
+    changed_files: tuple[str, ...] = ()
+    tests_run: tuple[str, ...] = ()
 
     def validate(self) -> None:
         require_text(self.call_id, "result call_id")
@@ -86,6 +95,12 @@ class ToolResult:
             require_text(self.error, "tool error")
         elif self.error is not None:
             raise ValueError("successful tool result cannot contain an error")
+        for label in ("changed_files", "tests_run"):
+            values = getattr(self, label)
+            if not isinstance(values, tuple):
+                raise ValueError(f"{label} must be a tuple")
+            for value in values:
+                require_text(value, label)
 
 
 @dataclass(frozen=True)

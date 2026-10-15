@@ -1,80 +1,149 @@
 # Fennec X Code
 
-I1 implements a deterministic, in-memory Agent Core foundation in this existing
-project root. Authority: `SCA-V0-Core-Architecture-v0.1.md` and
-`SCA-V0-Codex-I1-Task.md`. Both approved documents are preserved unchanged.
+I1 provides a deterministic Agent Core. I2 adds Workspace & Context and five
+restricted local tools through the same executor boundary. The approved
+`SCA-V0-Core-Architecture-v0.1.md` and `SCA-V0-Codex-I1-Task.md` remain unchanged.
 
-Requires Python 3.12+. Runtime dependencies: standard library only. Tests require
-pytest 8 or 9 (declared in the `test` optional dependency).
+Requires Python >=3.12. Runtime code uses only the standard library. The test
+extra requires pytest 8 or 9; command test execution also requires an installed
+pytest outside the target workspace. No dependencies are installed by the tools.
 
-Run from this directory with pytest already available:
+Run the complete I1 and I2 suite from this directory:
 
 ```powershell
-python -m pytest -q
+python -m pytest -q -p no:cacheprovider
 ```
 
-The package can also be installed using the standard `pyproject.toml` build
-configuration; no installation is needed to run the tests from the project root.
+Tests use disposable pytest projects, including real file operations and child
+pytest processes. They require access to the system temp directory. Windows
+link tests use junctions if creating a symbolic link requires extra privileges.
 
-## Files and boundaries
+## Modules and interfaces
 
-- `sca/contracts.py`: typed dataclasses for tasks, requests, responses, calls,
-  results, messages and minimal fake-tool definitions.
-- `sca/model.py`: `ModelGateway.generate(request) -> ModelResponse` protocol and
-  scripted `FakeModel`; each invocation records a detached request snapshot.
-- `sca/tools.py`: `ToolExecutor.tool_definitions` and `execute(call) -> ToolResult`
-  protocol, plus a scripted, recording `FakeToolExecutor`.
-- `sca/agent.py`: `AgentCore(gateway, executor, max_model_rounds=25).run(task)`;
-  contains no fake-specific logic. Context, counters, and IDs are local to a run.
-- `tests/`: deterministic contract, fake, and Agent Loop acceptance tests.
+- `sca/contracts.py`: the six required dataclasses, messages, and tool schemas.
+- `sca/model.py`: unchanged `ModelGateway.generate(request) -> ModelResponse`
+  and scripted FakeModel. No live provider or network integration.
+- `sca/workspace.py`: `Workspace(root, max_file_bytes=1048576)`, safe
+  `resolve`, `read_text`, `list_files`, and `start_session(task)`. Text snapshots
+  retain raw-byte SHA-256, content, identity and mode. SessionContext holds the
+  task, workspace, initial Git status and tool results in memory.
+- `sca/tools.py`: `ToolExecutor.tool_definitions`, `execute(call) -> ToolResult`,
+  and the additive `begin_task(task) -> None` lifecycle hook. FakeToolExecutor's
+  hook does no I/O. ToolRuntime's hook binds the task to the workspace and resets
+  per-task evidence/IDs before the gateway is called. Custom I1 executors need
+  to provide this hook; execution and tool-definition signatures are unchanged.
+- `sca/commands.py`: fixed command allowlist and bounded process runner. It
+  performs no task orchestration and exposes no plugin registration mechanism.
+- `sca/agent.py`: `AgentCore(gateway, executor, max_model_rounds=25,
+  continue_on_tool_error=False).run(task) -> TaskResult`.
 
-Dependencies flow from Agent Core to the gateway/executor interfaces and shared
-contracts; contracts import no other package modules. No workspace or CLI module
-is needed in I1. `AgentTask.workspace_root` is metadata and is never accessed.
+Dependencies flow from Agent Core to interfaces and contracts; the tool runtime
+uses workspace and command helpers, and those helpers never invoke the model.
+`ToolDefinition` now supports `optional_argument_types` alongside required exact
+types. Unknown arguments are rejected. `ToolResult` adds optional tuple fields
+`changed_files` and `tests_run`; Core aggregates this executor evidence rather
+than parsing claims in model text. Existing constructors keep their defaults.
 
-## Loop and status semantics
+## Tool inputs and results
 
-The first request contains the task, instructions, user message, advertised fake
-tool definitions and model-round limit. A response has exactly one non-empty
-variant: `final_answer`, `tool_calls`, or `error`. Core validates this boundary.
+All paths are relative, use `/`, and stay inside the validated workspace.
+Results preserve the call ID and return `SUCCESS` or `ERROR`, text output,
+optional error text, and a truncation flag. Model-visible output/error strings
+are capped at 16 KiB by default; a cap may cut a line. Partial read/search output
+is marked truncated. Partial command output is an explicit error.
 
-Tool batches are validated in full before any executor invocation. Names must be
-advertised; argument names and exact Python types must match the minimal schema;
-each call ID must be non-empty and unique throughout the task. Calls execute
-sequentially. Assistant calls and correlated tool results enter the next request.
-Every executed call has exactly one recorded result. A rejected batch executes
-nothing; later calls in a failed batch are never attempted.
+| Tool | Required arguments | Optional arguments | Behavior |
+| --- | --- | --- | --- |
+| `list_files` | None | `path: str = "."`, `max_results: int = 200` | Recursive sorted relative files; excludes protected/generated paths and links |
+| `read_file` | `path: str` | `start_line: int = 1`, `end_line: int = final line` | UTF-8 text, path and full-file raw-byte SHA-256; line ranges are inclusive |
+| `search_text` | `text: str` | `path: str = "."`, `max_results: int = 200` | Literal case-sensitive single-line search; returns `path:line:text` |
+| `apply_patch` | `path: str`, `expected_sha256: str`, `edits: list` | None | One existing file; 1-20 `{old: str, new: str}` edits matched against the original content |
+| `run_command` | `argv: list[str]` | None | Authorized allowlisted command in the fixed workspace root |
 
-Task statuses:
+File reads/patch results are limited to 1 MiB by default. Listings inspect at most
+10,000 directory entries. Search reads at most eight times the file-size limit
+per invocation and excludes binary, non-UTF-8 and oversized files. Both listing
+and search have result limits; truncation is conservative at a result boundary.
 
-- `COMPLETED`: a valid final answer ended the loop without an execution error.
-  The summary is model text, not proof of project changes or passing tests.
-- `ERROR`: invalid response/call, gateway error, failed tool, invalid executor
-  result, or exhausted script. Errors and all prior tool evidence are retained.
-- `LIMIT_REACHED`: the configured number of model invocations was consumed
-  without a final answer. Tools requested in the last round still execute once.
+## Authorization and commands
 
-Tool statuses are `SUCCESS` or `ERROR`. Results preserve `call_id`, output, error
-and the `truncated` flag. A malformed/mismatched result or executor exception is
-recorded as an error against the original call ID, with no invented success.
-The first error terminates the run. There are no retries. Script exhaustion
-fails explicitly rather than repeating the previous item.
+`ToolRuntime(workspace, authorize=None, trusted_project=False,
+timeout_seconds=10, max_output_bytes=16384)` allows safe reads by default.
+Writes and every command require a trusted, application-injected
+`Callable[[ToolCall], bool]`. Only literal `True` authorizes the detached call;
+missing, denying, non-boolean or failing policies fail closed. Model text cannot
+set policy, trust, executable paths, environment, timeouts or output limits.
 
-`TaskResult` includes status, summary, changed files, tests run, errors, model
-round count and tool results. `changed_files` and `tests_run` remain empty in I1:
-the runtime cannot perform or verify either operation. Automated verification
-of this implementation is separate from those per-task fields.
+Commands additionally require `trusted_project=True`. Accepted argv forms:
 
-## Scope
+- `["python", "--version"]`.
+- `["python", "-m", "pytest", ...]`, with existing safe workspace targets and
+  only `-q`, `-v`, `-s`, `--disable-warnings`, `--maxfail=1` flags.
+- `["git", "status", "--short"]`, only for a normal `.git` directory at the
+  workspace root. Ancestor repositories and linked Git worktrees are refused.
 
-The runtime and deterministic tests use no real LLMs, credentials, filesystem
-tools, subprocesses, shell, Git, or external projects. Repository setup and
-verification commands are development operations only. A guard test exercises
-the loop with file opening, networking and command execution disabled.
+User-supplied shell, Python `-c`, arbitrary scripts/modules, pytest argument
+files, arbitrary pytest options, package installation, Git writes and network
+commands are rejected before process creation. Executable paths are pinned
+outside the workspace. Subprocesses use structured argv, `shell=False`, closed
+stdin, a reduced environment, disabled pytest plugin autoload and fixed pytest
+configuration. An internal fixed Python bootstrap imports the verified pytest
+installation in isolated mode; it accepts no caller-supplied Python code.
 
-Time limits, output-size enforcement, cancellation, permissions, workspace
-access, real tools, persistence, live providers and CLI integration belong to
-later authorized stages. There are no subagents, Skills, planners, plugin
-systems or advanced memory features.
+Before a patch or command in a Git workspace, the runtime requires separate
+authorization for its initial read-only Git-status preflight. This records
+pre-existing dirty paths without staging/resetting anything. Denied, failed,
+timed-out or truncated preflight blocks the pending operation. Non-Git roots
+record that fact without running Git. A direct authorized Git status can supply
+the initial snapshot. Git-status inspection itself does not take optional locks.
 
-**I1 only — I2 is NOT authorized.**
+The runner bounds capture while reading and terminates on timeout or output
+overflow. Windows termination requests the process tree with native `taskkill`;
+POSIX uses a process group. Pytest runs record actual exit/failure/timeout
+evidence. Failed tests never become reported success.
+
+## Workspace and patch safety
+
+The root must exist, remain the same directory, and have no linked ancestors.
+Traversal, absolute/drive/UNC paths, alternate data streams, reserved devices,
+ambiguous components, symlinks, junctions/reparse points and hardlinked files are
+refused. Protected names include `.git`, known credential/config locations,
+`.env*`, secret/credential files, private-key extensions, generated directories,
+and both approved specification filenames. This is a conservative denylist,
+not a detector of every possible secret in arbitrary source files.
+
+Patches require the current SHA-256, exactly one occurrence of every old span
+(including overlapping occurrences), disjoint edits, bounded UTF-8 content and
+a net content change. They preserve line endings and unrelated text. Immediately
+before replacement, the runtime compares content hash and file identity again.
+Replacement uses a sibling temporary file, flush/fsync, preserved mode and
+atomic replace; rejected patches leave the target unchanged and clean up
+temporary files. Read-only files, creation/deletion/rename and multi-file patch
+transactions are unsupported. Existing user edits are retained rather than
+reset or reconstructed from Git.
+
+## I1 behavior changes and remaining scope
+
+The model instruction now refers to advertised tools without naming fakes.
+Default tool-error behavior remains fail-fast. Explicitly enabling
+`continue_on_tool_error` feeds reported errors back into the next request, but
+keeps them in the final ERROR status; exceptions escaping the executor remain
+fatal. IDs cannot repeat and no tools or gateways are automatically retried.
+
+The final allowed model round may return a final answer, but cannot execute a
+tool batch because no model round remains to inspect its results. It returns
+`LIMIT_REACHED` with the earlier evidence. This intentionally tightens I1's
+last-round behavior; the existing limit test and new regression tests cover it.
+
+Only trusted local projects are supported. Project tests/conftest can execute
+arbitrary code, access the host/network and spawn processes. This runtime is not
+an OS sandbox; environment filtering and an allowlist do not change that.
+Process-tree termination is best effort, especially for detached/reparented
+children. Optimistic patch rechecks detect ordinary concurrent edits but do not
+provide an OS-wide compare-and-swap guarantee against malicious race attacks.
+Command side effects other than direct patch operations are not inventoried in
+`changed_files`. Sessions are in memory; cancellation and a whole-task wall-clock
+deadline remain deferred. No I3, I4, live LLM, CLI, subagents, Skills, planners,
+plugins, advanced memory or multi-agent features are implemented.
+
+**Stop after I2. I3 requires explicit authorization.**
